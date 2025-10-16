@@ -8,7 +8,7 @@ import requests # New library to make API requests
 
 # --- TMDb API Configuration ---
 # IMPORTANT: Replace this with your own TMDb API key
-TMD_API_KEY = "YOUR_API_KEY_HERE"
+TMD_API_KEY = "a9a216f9e133de9decef1e9b8501b419"
 
 # --- Caching our data loading and model training ---
 @st.cache_data
@@ -119,8 +119,11 @@ st.header('Select a Movie to Get Personalized Recommendations')
 movie_list = movie_matrix.index.tolist()
 selected_movie = st.selectbox('Choose a movie you like:', movie_list)
 
+# --- Corrected Streamlit App Interface Logic ---
+
 if st.button('Find Similar Movies'):
-    if not TMD_API_KEY or TMD_API_KEY == "a9a216f9e133de9decef1e9b8501b419":
+    # This check is now corrected to look for the placeholder
+    if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
         st.error("Please add your TMDb API key to the code to fetch movie details.")
     else:
         # Display details for the selected movie
@@ -128,7 +131,8 @@ if st.button('Find Similar Movies'):
         st.subheader(f"Because you selected: {selected_movie}")
         col1, col2 = st.columns([1, 2])
         with col1:
-            st.image(poster_url, use_column_width=True)
+            # This line is now corrected to use 'use_container_width'
+            st.image(poster_url, use_container_width=True)
         with col2:
             st.write("**Synopsis:**")
             st.write(overview)
