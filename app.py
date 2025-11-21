@@ -45,7 +45,7 @@ def load_data_and_train_model():
     
     return movie_matrix, model_knn, movie_info, movies_df
 
-# --- API Session Setup with Retries ---
+# --- API Session Setup ---
 def get_session():
     session = requests.Session()
     retry = Retry(connect=3, backoff_factor=0.5)
@@ -58,8 +58,6 @@ def get_session():
 @st.cache_data
 def fetch_trending_movies():
     """Fetches Top movies released strictly between 2018 and Now"""
-    # We use 'discover' endpoint with strict date filters
-    # sort_by=popularity.desc ensures we get the hits
     current_date = datetime.now().strftime('%Y-%m-%d')
     url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&primary_release_date.lte={current_date}&sort_by=popularity.desc"
     
@@ -70,7 +68,6 @@ def fetch_trending_movies():
         response.raise_for_status()
         data = response.json()
         
-        # Double-check the year just in case
         valid_movies = []
         for m in data['results']:
             release_date = m.get('release_date', '')
@@ -78,10 +75,8 @@ def fetch_trending_movies():
                 year = int(release_date.split('-')[0])
                 if year >= 2018:
                     valid_movies.append(m['title'])
-        
         return valid_movies
     except Exception as e:
-        st.sidebar.error(f"API Connection Error: {str(e)}")
         return []
 
 @st.cache_data
@@ -144,29 +139,44 @@ def fetch_movie_details(movie_title, is_tmdb_search=False):
 
 # --- Recommendation Logic ---
 def get_recommendations(movie_title, model, matrix, movies_df, is_new_movie):
-    if not is_new_movie:
-        # CLASSIC: Use k-NN
-        if movie_title in matrix.index:
-            try:
-                movie_index = matrix.index.get_loc(movie_title)
-                distances, indices = model.kneighbors(matrix.iloc[movie_index, :].values.reshape(1, -1))
-                return [matrix.index[index] for i, index in enumerate(indices[0]) if i > 0], "Collaborative Filtering (User Patterns)"
-            except:
-                return [], "Error"
-        return [], "Not Found"
+    
+    # Strategy 1: Classic Collaborative Filtering (k-NN)
+    # This is preferred if the movie exists in our historical database
+    if movie_title in matrix.index:
+        try:
+            movie_index = matrix.index.get_loc(movie_title)
+            distances, indices = model.kneighbors(matrix.iloc[movie_index, :].values.reshape(1, -1))
+            return [matrix.index[index] for i, index in enumerate(indices[0]) if i > 0], "Collaborative Filtering (User Patterns)"
+        except:
+            pass # Fallback to content-based if k-NN fails for some reason
+
+    # Strategy 2: Content-Based (Genre Matching)
+    # Used for NEW movies OR Classic movies that failed k-NN
+    # First, we need to know the genre.
+    # If it's a new movie search, we already fetched genres from API.
+    # If it's a classic, we can get it from our dataframe.
+    
+    primary_genre = None
+    
+    if is_new_movie:
+         _, _, _, _, _, _, genres = fetch_movie_details(movie_title, is_tmdb_search=True)
+         if genres: primary_genre = genres[0]
     else:
-        # NEW MOVIE: Use Content-Based (Genre Matching)
-        _, _, _, _, _, _, genres = fetch_movie_details(movie_title, is_tmdb_search=True)
-        if not genres: return [], "No Data"
-        
-        primary_genre = genres[0]
-        # Filter dataframe for this genre
+        # Try to find genre in our local dataframe for classics
+        try:
+            # Use string matching to find the row
+            genre_str = movies_df[movies_df['title'] == movie_title]['genres'].values[0]
+            if genre_str: primary_genre = genre_str.split('|')[0]
+        except:
+            pass
+            
+    # If we found a genre, recommend movies from that genre
+    if primary_genre:
         fallback_recs = movies_df[movies_df['genres'].str.contains(primary_genre, case=False, na=False)]
-        
-        if fallback_recs.empty: return [], "No Matches"
-        
-        # Return 5 random top ones
-        return fallback_recs['title'].sample(5).tolist(), f"Content-Based (Matching Genre: {primary_genre})"
+        if not fallback_recs.empty:
+             return fallback_recs['title'].sample(5).tolist(), f"Content-Based (Matching Genre: {primary_genre})"
+    
+    return [], "No Matches"
 
 def explain_recommendation(selected_movie, recommended_movie, movie_info, strategy):
     if "Collaborative" in strategy:
@@ -183,8 +193,11 @@ def explain_recommendation(selected_movie, recommended_movie, movie_info, strate
             return "Recommended based on user rating patterns."
     else:
         # Explanation for new movies
-        genre = strategy.split(': ')[1].replace(')', '')
-        return f"Since '{selected_movie}' is a **{genre}** movie, we selected this highly-rated classic from our vault."
+        try:
+            genre = strategy.split(': ')[1].replace(')', '')
+            return f"Since '{selected_movie}' is a **{genre}** movie, we selected this highly-rated classic from our vault."
+        except:
+             return "Recommended based on genre similarity."
 
 # --- Helper Functions ---
 @st.cache_data
@@ -226,7 +239,6 @@ except:
 with st.sidebar:
     st.title("🔍 Curator Controls")
     
-    # THE NEW TOGGLE SWITCH
     collection_mode = st.radio(
         "Select Movie Collection:",
         ["🏛️ Classics (1900-2018)", "🔥 Modern Hits (2018-2025)"]
@@ -240,7 +252,6 @@ with st.sidebar:
         max_year = int(movies_df['year'].max())
         year_range = st.slider("Filter Year:", min_year, max_year, (1990, max_year))
         
-        # Filter the list
         filtered_movies = movies_df[
             (movies_df['year'] >= year_range[0]) & 
             (movies_df['year'] <= year_range[1])
@@ -265,65 +276,75 @@ with tab1:
     
     if is_trending_mode:
         st.markdown("### 🔥 Exploring: Modern Hits (2018-2025)")
+        cols_search = st.columns([3, 1])
+        with cols_search[0]:
+            manual_search = st.text_input("🔍 Type ANY movie name (e.g., Oppenheimer, Moon Knight):")
+        with cols_search[1]:
+            trending_selection = st.selectbox("Or pick a Trending Movie:", display_list)
+        
+        selected_movie_raw = manual_search if manual_search else trending_selection
+
     else:
         st.markdown("### 🏛️ Exploring: The Classics Library")
-
-    selected_movie_raw = st.selectbox(
-        '📽️ Select a Movie:', 
-        display_list
-    )
+        selected_movie_raw = st.selectbox('📽️ Select a Classic Movie:', display_list)
 
     if st.button('🚀 Generate Recommendations'):
-        if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
+        if not selected_movie_raw:
+            st.error("Please select or type a movie name.")
+        elif not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
             st.error("⚠️ Please enter your API Key.")
         else:
             # Fetch Details
             real_title, poster, overview, video_key, director, cast, _ = fetch_movie_details(
                 selected_movie_raw, 
-                is_tmdb_search=is_trending_mode # True if trending, False if classic
+                is_tmdb_search=is_trending_mode 
             )
             
-            st.markdown("---")
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                st.image(poster, use_container_width=True)
-            
-            with col2:
-                st.header(real_title)
-                st.markdown(f"**🎬 Director:** {director}")
-                st.markdown(f"**🎭 Cast:** {', '.join(cast)}")
-                st.write(f"**📝 Synopsis:** {overview}")
-                
-                if video_key:
-                    st.markdown("### 🍿 Official Trailer")
-                    st.video(f"https://www.youtube.com/watch?v={video_key}")
-
-            # --- RECOMMENDATIONS ---
-            st.markdown("---")
-            st.subheader("✨ AI Curated Picks For You")
-            
-            # Get recommendations
-            recs, strategy = get_recommendations(selected_movie_raw, model_knn, movie_matrix, movies_df, is_trending_mode)
-            
-            if recs:
-                st.caption(f"⚡ Logic: {strategy}")
-                cols = st.columns(5)
-                for i, movie in enumerate(recs[:5]):
-                    with cols[i]:
-                        # Recs are always classics from our DB
-                        t, p, o, v, d, c, _ = fetch_movie_details(movie, is_tmdb_search=False)
-                        st.image(p, caption=t)
-                        
-                        with st.expander("💡 Why this?"):
-                            explanation = explain_recommendation(selected_movie_raw, movie, movie_info, strategy)
-                            st.info(explanation)
+            if real_title == selected_movie_raw and "Not Found" in poster:
+                 st.error(f"Could not find movie: '{selected_movie_raw}'. Check the spelling!")
             else:
-                st.warning("No recommendations found.")
+                st.markdown("---")
+                col1, col2 = st.columns([1, 2])
+                
+                with col1:
+                    st.image(poster, use_container_width=True)
+                
+                with col2:
+                    st.header(real_title)
+                    st.markdown(f"**🎬 Director:** {director}")
+                    st.markdown(f"**🎭 Cast:** {', '.join(cast)}")
+                    st.write(f"**📝 Synopsis:** {overview}")
+                    
+                    if video_key:
+                        st.markdown("### 🍿 Official Trailer")
+                        st.video(f"https://www.youtube.com/watch?v={video_key}")
+
+                # --- RECOMMENDATIONS ---
+                st.markdown("---")
+                st.subheader("✨ AI Curated Picks For You")
+                
+                # NOTE: We pass 'real_title' if it's a modern search to ensure accuracy,
+                # but for Classics, we stick to 'selected_movie_raw' to match the matrix index.
+                search_title = real_title if is_trending_mode else selected_movie_raw
+                
+                recs, strategy = get_recommendations(search_title, model_knn, movie_matrix, movies_df, is_trending_mode)
+                
+                if recs:
+                    st.caption(f"⚡ Logic: {strategy}")
+                    cols = st.columns(5)
+                    for i, movie in enumerate(recs[:5]):
+                        with cols[i]:
+                            t, p, o, v, d, c, _ = fetch_movie_details(movie, is_tmdb_search=False)
+                            st.image(p, caption=t)
+                            
+                            with st.expander("💡 Why this?"):
+                                explanation = explain_recommendation(search_title, movie, movie_info, strategy)
+                                st.info(explanation)
+                else:
+                    st.warning("No recommendations found.")
 
 with tab2:
     st.header("📊 Dataset Analytics")
-    # Simple genre chart
     all_genres = movies_df['genres'].str.split('|', expand=True).stack()
     top_genres = all_genres.value_counts().head(10)
     fig, ax = plt.subplots(figsize=(10, 5))
