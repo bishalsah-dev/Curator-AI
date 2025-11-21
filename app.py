@@ -4,68 +4,176 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from sklearn.neighbors import NearestNeighbors
 import base64
-import requests # New library to make API requests
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import matplotlib.pyplot as plt
+import urllib3
+
+# --- PAGE CONFIGURATION ---
+st.set_page_config(page_title="Curator AI Pro", page_icon="🎬", layout="wide")
 
 # --- TMDb API Configuration ---
 # IMPORTANT: Replace this with your own TMDb API key
-TMD_API_KEY = "a9a216f9e133de9decef1e9b8501b419"
+TMD_API_KEY = "a9a216f9e133de9decef1e9b8501b419" 
 
-# --- Caching our data loading and model training ---
+# --- Caching Data & Model ---
 @st.cache_data
 def load_data_and_train_model():
-    # ... (This function is exactly the same as before)
     path = 'data/ml-latest-small/'
     movies_df = pd.read_csv(path + 'movies.csv')
     ratings_df = pd.read_csv(path + 'ratings.csv')
     tags_df = pd.read_csv(path + 'tags.csv')
+    
+    # Clean Year
+    movies_df['year'] = movies_df['title'].str.extract(r'\((\d{4})\)')
+    movies_df['year'] = pd.to_numeric(movies_df['year'], errors='coerce')
+    
+    # Merge
     movies_with_ratings_df = pd.merge(ratings_df, movies_df, on='movieId')
     movie_tags_df = tags_df.groupby('movieId')['tag'].apply(lambda x: '|'.join(x)).reset_index()
     movie_info = pd.merge(movies_df, movie_tags_df, on='movieId', how='left')
     movie_info['tag'] = movie_info['tag'].fillna('')
     movie_info['attributes'] = movie_info['genres'] + '|' + movie_info['tag']
+    
+    # Matrix
     movie_matrix = movies_with_ratings_df.pivot_table(index='title', columns='userId', values='rating').fillna(0)
     movie_matrix_sparse = csr_matrix(movie_matrix.values)
     model_knn = NearestNeighbors(metric='cosine', algorithm='brute', n_neighbors=10)
     model_knn.fit(movie_matrix_sparse)
-    return movie_matrix, model_knn, movie_info
-
-# --- NEW FUNCTION: Fetch movie poster and overview from TMDb ---
-@st.cache_data # Cache the results to avoid repeated API calls
-def fetch_movie_details(movie_title):
-    """
-    Fetches movie poster URL and overview from TMDb API.
-    """
-    # Extract the movie name without the year
-    movie_name = movie_title.split(' (')[0]
     
-    # Construct the API request URL
-    url = f"https://api.themoviedb.org/3/search/movie?api_key={TMD_API_KEY}&query={movie_name}"
+    return movie_matrix, model_knn, movie_info, movies_df
+
+# --- API Session Setup with Retries ---
+def get_session():
+    session = requests.Session()
+    retry = Retry(connect=3, backoff_factor=0.5)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+# --- API Functions ---
+@st.cache_data
+def fetch_trending_movies():
+    """Fetches Top 20 movies released in 2024-2025"""
+    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2024-01-01&sort_by=popularity.desc"
+    try:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        session = get_session()
+        response = session.get(url, verify=False, timeout=10) # Added timeout and session
+        response.raise_for_status()
+        data = response.json()
+        return [m['title'] for m in data['results']]
+    except Exception as e:
+        st.sidebar.error(f"API Connection Error: {str(e)}")
+        return []
+
+@st.cache_data
+def fetch_movie_details(movie_title, is_tmdb_search=False):
+    """Fetches Poster, Overview, Trailer, Cast"""
+    if is_tmdb_search:
+        search_url = f"https://api.themoviedb.org/3/search/movie?api_key={TMD_API_KEY}&query={movie_title}"
+    else:
+        movie_name = movie_title.split(' (')[0]
+        search_url = f"https://api.themoviedb.org/3/search/movie?api_key={TMD_API_KEY}&query={movie_name}"
     
     try:
-        response = requests.get(url)
-        response.raise_for_status() # Raise an exception for bad status codes
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        session = get_session()
+        response = session.get(search_url, verify=False, timeout=10) # Added timeout and session
+        response.raise_for_status()
         data = response.json()
         
         if data['results']:
-            # Get the first result
             movie_data = data['results'][0]
+            movie_id = movie_data['id']
+            real_title = movie_data['title']
             poster_path = movie_data.get('poster_path')
             overview = movie_data.get('overview')
+            poster_url = f"https://image.tmdb.org/t/p/w500/{poster_path}" if poster_path else "https://placehold.co/500x750/333333/FFFFFF?text=No+Poster"
             
-            if poster_path:
-                poster_url = f"https://image.tmdb.org/t/p/w500/{poster_path}"
-            else:
-                poster_url = "https://placehold.co/500x750/333333/FFFFFF?text=No+Poster" # Placeholder
+            # Details
+            details_url = f"https://api.themoviedb.org/3/movie/{movie_id}?api_key={TMD_API_KEY}&append_to_response=videos,credits"
+            details_response = session.get(details_url, verify=False, timeout=10)
+            details_data = details_response.json()
             
-            return poster_url, overview
+            # Trailer
+            video_key = None
+            if 'videos' in details_data and details_data['videos']['results']:
+                for video in details_data['videos']['results']:
+                    if video['type'] == 'Trailer' and video['site'] == 'YouTube':
+                        video_key = video['key']
+                        break
+            
+            # Cast & Director & Genres
+            director = "Unknown"
+            cast = []
+            genres = [g['name'] for g in details_data.get('genres', [])]
+            
+            if 'credits' in details_data:
+                crew = details_data['credits'].get('crew', [])
+                cast_data = details_data['credits'].get('cast', [])
+                for member in crew:
+                    if member['job'] == 'Director':
+                        director = member['name']
+                        break
+                cast = [member['name'] for member in cast_data[:3]]
+                
+            return real_title, poster_url, overview, video_key, director, cast, genres
         else:
-            return "https://placehold.co/500x750/333333/FFFFFF?text=Not+Found", "No overview available."
+            return movie_title, "https://placehold.co/500x750/333333/FFFFFF?text=Not+Found", "No details found.", None, "Unknown", [], []
             
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request failed: {e}")
-        return "https://placehold.co/500x750/333333/FFFFFF?text=Error", "Could not fetch details."
+    except Exception as e:
+        return movie_title, "https://placehold.co/500x750/333333/FFFFFF?text=Error", f"Error: {str(e)}", None, "Unknown", [], []
 
-# --- Background Image and Recommendation Functions (mostly unchanged) ---
+# --- Recommendation Logic ---
+def get_recommendations(movie_title, model, matrix, movies_df, is_new_movie):
+    if not is_new_movie:
+        # CLASSIC: Use k-NN
+        if movie_title in matrix.index:
+            try:
+                movie_index = matrix.index.get_loc(movie_title)
+                distances, indices = model.kneighbors(matrix.iloc[movie_index, :].values.reshape(1, -1))
+                return [matrix.index[index] for i, index in enumerate(indices[0]) if i > 0], "Collaborative Filtering (User Patterns)"
+            except:
+                return [], "Error"
+        return [], "Not Found"
+    else:
+        # NEW MOVIE: Use Content-Based (Genre Matching)
+        # 1. Get genres of the new movie
+        _, _, _, _, _, _, genres = fetch_movie_details(movie_title, is_tmdb_search=True)
+        if not genres: return [], "No Data"
+        
+        # 2. Find classic movies with same genres
+        primary_genre = genres[0]
+        # Filter dataframe for this genre
+        fallback_recs = movies_df[movies_df['genres'].str.contains(primary_genre, case=False, na=False)]
+        
+        if fallback_recs.empty: return [], "No Matches"
+        
+        # 3. Return 5 random top ones
+        return fallback_recs['title'].sample(5).tolist(), f"Content-Based (Matching Genre: {primary_genre})"
+
+def explain_recommendation(selected_movie, recommended_movie, movie_info, strategy):
+    if "Collaborative" in strategy:
+        try:
+            sel_attrs = set(movie_info.loc[movie_info['title'] == selected_movie, 'attributes'].iloc[0].split('|'))
+            rec_attrs = set(movie_info.loc[movie_info['title'] == recommended_movie, 'attributes'].iloc[0].split('|'))
+            common = list(sel_attrs.intersection(rec_attrs))
+            common = [c for c in common if c]
+            reason = f"Because you liked '{selected_movie}'."
+            if common:
+                reason += f" They share themes like: **{', '.join(common[:3])}**."
+            return reason
+        except:
+            return "Recommended based on user rating patterns."
+    else:
+        # Explanation for new movies
+        genre = strategy.split(': ')[1].replace(')', '')
+        return f"Since '{selected_movie}' is a **{genre}** movie, we selected this highly-rated classic from our vault."
+
+# --- Helper Functions ---
 @st.cache_data
 def get_base64_of_bin_file(bin_file):
     with open(bin_file, 'rb') as f:
@@ -79,78 +187,133 @@ def set_background(image_file):
     .stApp {{
         background-image: url("data:image/jpeg;base64,{bin_str}");
         background-size: cover;
+        background-attachment: fixed;
+    }}
+    .stMarkdown, .stText, .stHeader {{
+        background-color: rgba(0, 0, 0, 0.6);
+        padding: 15px;
+        border-radius: 10px;
     }}
     </style>
     '''
     st.markdown(page_bg_img, unsafe_allow_html=True)
 
-def get_recommendations(movie_title, model, matrix):
-    # ... (This function is the same)
-    try:
-        movie_index = matrix.index.get_loc(movie_title)
-        distances, indices = model.kneighbors(matrix.iloc[movie_index, :].values.reshape(1, -1))
-        neighbor_indices = indices[0]
-        recommendations = [matrix.index[index] for i, index in enumerate(neighbor_indices) if i > 0]
-        return recommendations
-    except KeyError:
-        return ["Movie not found in the dataset."]
+# --- MAIN APP ---
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # Silence SSL warnings
 
-def explain_recommendation(selected_movie, recommended_movie, movie_info):
-    # ... (This function is the same)
-    try:
-        selected_attrs = set(movie_info.loc[movie_info['title'] == selected_movie, 'attributes'].iloc[0].split('|'))
-        recommended_attrs = set(movie_info.loc[movie_info['title'] == recommended_movie, 'attributes'].iloc[0].split('|'))
-        common_attributes = [attr for attr in list(selected_attrs.intersection(recommended_attrs)) if attr]
-        if common_attributes:
-            return f"It shares common themes like **'{', '.join(common_attributes[:3])}'** with your selection."
-        else:
-            return f"It is recommended because users who liked '{selected_movie}' also liked this movie."
-    except (KeyError, IndexError):
-        return "Could not generate a detailed explanation."
+movie_matrix, model_knn, movie_info, movies_df = load_data_and_train_model()
 
-# --- Load data and train model ---
-movie_matrix, model_knn, movie_info = load_data_and_train_model()
+try:
+    set_background('assets/background.jpg')
+except:
+    pass
 
-# --- MODIFIED Streamlit App Interface ---
-st.title('Curator AI 🎬')
-set_background('assets/background.jpg')
-st.header('Select a Movie to Get Personalized Recommendations')
-
-movie_list = movie_matrix.index.tolist()
-selected_movie = st.selectbox('Choose a movie you like:', movie_list)
-
-# --- Corrected Streamlit App Interface Logic ---
-
-if st.button('Find Similar Movies'):
-    # This check is now corrected to look for the placeholder
-    if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
-        st.error("Please add your TMDb API key to the code to fetch movie details.")
-    else:
-        # Display details for the selected movie
-        poster_url, overview = fetch_movie_details(selected_movie)
-        st.subheader(f"Because you selected: {selected_movie}")
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            # This line is now corrected to use 'use_container_width'
-            st.image(poster_url, use_container_width=True)
-        with col2:
-            st.write("**Synopsis:**")
-            st.write(overview)
-
-        st.write("---") # Separator
-
-        # Get and display recommendations
-        recommendations = get_recommendations(selected_movie, model_knn, movie_matrix)
-        st.subheader("Here are some movies you might also like:")
+# --- SIDEBAR CONTROLS ---
+with st.sidebar:
+    st.title("🔍 Curator Controls")
+    
+    # THE NEW TOGGLE SWITCH
+    collection_mode = st.radio(
+        "Select Movie Collection:",
+        ["🏛️ Classics (1900-2018)", "🔥 Trending Now (2024-2025)"]
+    )
+    
+    st.markdown("---")
+    
+    if collection_mode == "🏛️ Classics (1900-2018)":
+        st.info("Using **k-NN AI Model** on historical data.")
+        min_year = int(movies_df['year'].min())
+        max_year = int(movies_df['year'].max())
+        year_range = st.slider("Filter Year:", min_year, max_year, (1990, max_year))
         
-        # Display recommendations in a 5-column grid
-        cols = st.columns(5)
-        for i, movie in enumerate(recommendations[:5]):
-            with cols[i]:
-                rec_poster_url, rec_overview = fetch_movie_details(movie)
-                st.image(rec_poster_url, caption=movie)
-                with st.expander("See details"):
-                    st.write("**Synopsis:**")
-                    st.write(rec_overview)
-                    explanation = explain_recommendation(selected_movie, movie, movie_info)
-                    st.info(explanation)
+        # Filter the list
+        filtered_movies = movies_df[
+            (movies_df['year'] >= year_range[0]) & 
+            (movies_df['year'] <= year_range[1])
+        ]
+        display_list = [m for m in filtered_movies['title'] if m in movie_matrix.index]
+        is_trending_mode = False
+        
+    else:
+        st.info("Fetching **Live Data** from TMDb API.")
+        if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
+            st.error("⚠️ API Key missing!")
+            display_list = []
+        else:
+            display_list = fetch_trending_movies()
+        is_trending_mode = True
+
+# --- MAIN UI ---
+tab1, tab2 = st.tabs(["🎥 Movie Recommender", "📊 Data Analytics"])
+
+with tab1:
+    st.title('Curator AI 3.0 🎬')
+    
+    if is_trending_mode:
+        st.markdown("### 🔥 Exploring: Modern Hits (2024-25)")
+    else:
+        st.markdown("### 🏛️ Exploring: The Classics Library")
+
+    selected_movie_raw = st.selectbox(
+        '📽️ Select a Movie:', 
+        display_list
+    )
+
+    if st.button('🚀 Generate Recommendations'):
+        if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
+            st.error("⚠️ Please enter your API Key.")
+        else:
+            # Fetch Details
+            real_title, poster, overview, video_key, director, cast, _ = fetch_movie_details(
+                selected_movie_raw, 
+                is_tmdb_search=is_trending_mode # True if trending, False if classic
+            )
+            
+            st.markdown("---")
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.image(poster, use_container_width=True)
+            
+            with col2:
+                st.header(real_title)
+                st.markdown(f"**🎬 Director:** {director}")
+                st.markdown(f"**🎭 Cast:** {', '.join(cast)}")
+                st.write(f"**📝 Synopsis:** {overview}")
+                
+                if video_key:
+                    st.markdown("### 🍿 Official Trailer")
+                    st.video(f"https://www.youtube.com/watch?v={video_key}")
+
+            # --- RECOMMENDATIONS ---
+            st.markdown("---")
+            st.subheader("✨ AI Curated Picks For You")
+            
+            # Get recommendations
+            recs, strategy = get_recommendations(selected_movie_raw, model_knn, movie_matrix, movies_df, is_trending_mode)
+            
+            if recs:
+                st.caption(f"⚡ Logic: {strategy}")
+                cols = st.columns(5)
+                for i, movie in enumerate(recs[:5]):
+                    with cols[i]:
+                        # Recs are always classics from our DB
+                        t, p, o, v, d, c, _ = fetch_movie_details(movie, is_tmdb_search=False)
+                        st.image(p, caption=t)
+                        
+                        with st.expander("💡 Why this?"):
+                            explanation = explain_recommendation(selected_movie_raw, movie, movie_info, strategy)
+                            st.info(explanation)
+            else:
+                st.warning("No recommendations found.")
+
+with tab2:
+    st.header("📊 Dataset Analytics")
+    # Simple genre chart
+    all_genres = movies_df['genres'].str.split('|', expand=True).stack()
+    top_genres = all_genres.value_counts().head(10)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    top_genres.plot(kind='bar', color='#ff4b4b', ax=ax)
+    ax.set_title("Top Genres in Classics Library")
+    st.pyplot(fig)
