@@ -10,6 +10,7 @@ from urllib3.util.retry import Retry
 import matplotlib.pyplot as plt
 import urllib3
 from datetime import datetime
+import random
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Curator AI Pro", page_icon="🎬", layout="wide")
@@ -57,26 +58,48 @@ def get_session():
 # --- API Functions ---
 @st.cache_data
 def fetch_trending_movies():
-    """Fetches Top movies released strictly between 2018 and Now"""
+    """Fetches a Mix of Global and STRICT Bollywood Hits (2018-Now)"""
     current_date = datetime.now().strftime('%Y-%m-%d')
-    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&primary_release_date.lte={current_date}&sort_by=popularity.desc"
+    
+    # 1. Global Hits URL
+    url_global = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&primary_release_date.lte={current_date}&sort_by=popularity.desc"
+    
+    # 2. Bollywood Hits URL (Strict Hindi Language + India Region)
+    url_india = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2023-01-01&primary_release_date.lte={current_date}&sort_by=popularity.desc&with_original_language=hi&region=IN"
     
     try:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session = get_session()
-        response = session.get(url, verify=False, timeout=10)
-        response.raise_for_status()
-        data = response.json()
         
-        valid_movies = []
-        for m in data['results']:
-            release_date = m.get('release_date', '')
-            if release_date:
-                year = int(release_date.split('-')[0])
-                if year >= 2018:
-                    valid_movies.append(m['title'])
-        return valid_movies
+        # Fetch Global (Get top 10)
+        resp_global = session.get(url_global, verify=False, timeout=10)
+        resp_global.raise_for_status()
+        data_global = resp_global.json()
+        
+        # Fetch Bollywood (Get top 15 - grab more to ensure visibility)
+        resp_india = session.get(url_india, verify=False, timeout=10)
+        resp_india.raise_for_status()
+        data_india = resp_india.json()
+        
+        titles = []
+        
+        # Add Global movies
+        for m in data_global['results'][:10]:
+            titles.append(m['title'])
+            
+        # Add Bollywood movies
+        for m in data_india['results'][:15]:
+            # Check duplicates
+            if m['title'] not in titles:
+                titles.append(m['title'])
+        
+        # Shuffle to mix
+        random.shuffle(titles)
+        
+        return titles
+
     except Exception as e:
+        st.sidebar.error(f"API Error: {e}")
         return []
 
 @st.cache_data
@@ -141,36 +164,27 @@ def fetch_movie_details(movie_title, is_tmdb_search=False):
 def get_recommendations(movie_title, model, matrix, movies_df, is_new_movie):
     
     # Strategy 1: Classic Collaborative Filtering (k-NN)
-    # This is preferred if the movie exists in our historical database
     if movie_title in matrix.index:
         try:
             movie_index = matrix.index.get_loc(movie_title)
             distances, indices = model.kneighbors(matrix.iloc[movie_index, :].values.reshape(1, -1))
             return [matrix.index[index] for i, index in enumerate(indices[0]) if i > 0], "Collaborative Filtering (User Patterns)"
         except:
-            pass # Fallback to content-based if k-NN fails for some reason
+            pass 
 
     # Strategy 2: Content-Based (Genre Matching)
-    # Used for NEW movies OR Classic movies that failed k-NN
-    # First, we need to know the genre.
-    # If it's a new movie search, we already fetched genres from API.
-    # If it's a classic, we can get it from our dataframe.
-    
     primary_genre = None
     
     if is_new_movie:
          _, _, _, _, _, _, genres = fetch_movie_details(movie_title, is_tmdb_search=True)
          if genres: primary_genre = genres[0]
     else:
-        # Try to find genre in our local dataframe for classics
         try:
-            # Use string matching to find the row
             genre_str = movies_df[movies_df['title'] == movie_title]['genres'].values[0]
             if genre_str: primary_genre = genre_str.split('|')[0]
         except:
             pass
             
-    # If we found a genre, recommend movies from that genre
     if primary_genre:
         fallback_recs = movies_df[movies_df['genres'].str.contains(primary_genre, case=False, na=False)]
         if not fallback_recs.empty:
@@ -192,7 +206,6 @@ def explain_recommendation(selected_movie, recommended_movie, movie_info, strate
         except:
             return "Recommended based on user rating patterns."
     else:
-        # Explanation for new movies
         try:
             genre = strategy.split(': ')[1].replace(')', '')
             return f"Since '{selected_movie}' is a **{genre}** movie, we selected this highly-rated classic from our vault."
@@ -226,7 +239,7 @@ def set_background(image_file):
 
 # --- MAIN APP ---
 import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) # Silence SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning) 
 
 movie_matrix, model_knn, movie_info, movies_df = load_data_and_train_model()
 
@@ -260,7 +273,7 @@ with st.sidebar:
         is_trending_mode = False
         
     else:
-        st.info("Fetching **Live Data** from TMDb API.")
+        st.info("Fetching **Global & Bollywood** Hits from TMDb API.")
         if not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
             st.error("⚠️ API Key missing!")
             display_list = []
@@ -278,7 +291,7 @@ with tab1:
         st.markdown("### 🔥 Exploring: Modern Hits (2018-2025)")
         cols_search = st.columns([3, 1])
         with cols_search[0]:
-            manual_search = st.text_input("🔍 Type ANY movie name (e.g., Oppenheimer, Moon Knight):")
+            manual_search = st.text_input("🔍 Type ANY movie name (e.g., Oppenheimer, Jawan, Animal):")
         with cols_search[1]:
             trending_selection = st.selectbox("Or pick a Trending Movie:", display_list)
         
@@ -294,7 +307,6 @@ with tab1:
         elif not TMD_API_KEY or TMD_API_KEY == "YOUR_API_KEY_HERE":
             st.error("⚠️ Please enter your API Key.")
         else:
-            # Fetch Details
             real_title, poster, overview, video_key, director, cast, _ = fetch_movie_details(
                 selected_movie_raw, 
                 is_tmdb_search=is_trending_mode 
@@ -319,12 +331,9 @@ with tab1:
                         st.markdown("### 🍿 Official Trailer")
                         st.video(f"https://www.youtube.com/watch?v={video_key}")
 
-                # --- RECOMMENDATIONS ---
                 st.markdown("---")
                 st.subheader("✨ AI Curated Picks For You")
                 
-                # NOTE: We pass 'real_title' if it's a modern search to ensure accuracy,
-                # but for Classics, we stick to 'selected_movie_raw' to match the matrix index.
                 search_title = real_title if is_trending_mode else selected_movie_raw
                 
                 recs, strategy = get_recommendations(search_title, model_knn, movie_matrix, movies_df, is_trending_mode)
