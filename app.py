@@ -44,7 +44,7 @@ def load_data_and_train_model():
     
     return movie_matrix, model_knn, movie_info, movies_df
 
-# --- API Session Setup with Retries ---
+# --- API Session Setup ---
 def get_session():
     session = requests.Session()
     retry = Retry(connect=3, backoff_factor=0.5)
@@ -57,16 +57,17 @@ def get_session():
 @st.cache_data
 def fetch_trending_movies():
     """Fetches Top 20 movies released in 2024-2025"""
-    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2024-01-01&sort_by=popularity.desc"
+    # We explicitly ask for movies released after Jan 1, 2018 to bridge the gap
+    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&sort_by=popularity.desc"
     try:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session = get_session()
-        response = session.get(url, verify=False, timeout=10) # Added timeout and session
+        response = session.get(url, verify=False, timeout=10)
         response.raise_for_status()
         data = response.json()
         return [m['title'] for m in data['results']]
     except Exception as e:
-        st.sidebar.error(f"API Connection Error: {str(e)}")
+        st.sidebar.error(f"API Error: {str(e)}")
         return []
 
 @st.cache_data
@@ -81,7 +82,7 @@ def fetch_movie_details(movie_title, is_tmdb_search=False):
     try:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session = get_session()
-        response = session.get(search_url, verify=False, timeout=10) # Added timeout and session
+        response = session.get(search_url, verify=False, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -141,18 +142,16 @@ def get_recommendations(movie_title, model, matrix, movies_df, is_new_movie):
         return [], "Not Found"
     else:
         # NEW MOVIE: Use Content-Based (Genre Matching)
-        # 1. Get genres of the new movie
         _, _, _, _, _, _, genres = fetch_movie_details(movie_title, is_tmdb_search=True)
         if not genres: return [], "No Data"
         
-        # 2. Find classic movies with same genres
         primary_genre = genres[0]
         # Filter dataframe for this genre
         fallback_recs = movies_df[movies_df['genres'].str.contains(primary_genre, case=False, na=False)]
         
         if fallback_recs.empty: return [], "No Matches"
         
-        # 3. Return 5 random top ones
+        # Return 5 random top ones
         return fallback_recs['title'].sample(5).tolist(), f"Content-Based (Matching Genre: {primary_genre})"
 
 def explain_recommendation(selected_movie, recommended_movie, movie_info, strategy):
@@ -216,7 +215,7 @@ with st.sidebar:
     # THE NEW TOGGLE SWITCH
     collection_mode = st.radio(
         "Select Movie Collection:",
-        ["🏛️ Classics (1900-2018)", "🔥 Trending Now (2024-2025)"]
+        ["🏛️ Classics (1900-2018)", "🔥 Modern Hits (2018-2025)"]
     )
     
     st.markdown("---")
@@ -251,7 +250,7 @@ with tab1:
     st.title('Curator AI 3.0 🎬')
     
     if is_trending_mode:
-        st.markdown("### 🔥 Exploring: Modern Hits (2024-25)")
+        st.markdown("### 🔥 Exploring: Modern Hits (2018-2025)")
     else:
         st.markdown("### 🏛️ Exploring: The Classics Library")
 
