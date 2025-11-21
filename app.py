@@ -9,6 +9,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import matplotlib.pyplot as plt
 import urllib3
+from datetime import datetime
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Curator AI Pro", page_icon="🎬", layout="wide")
@@ -44,7 +45,7 @@ def load_data_and_train_model():
     
     return movie_matrix, model_knn, movie_info, movies_df
 
-# --- API Session Setup ---
+# --- API Session Setup with Retries ---
 def get_session():
     session = requests.Session()
     retry = Retry(connect=3, backoff_factor=0.5)
@@ -56,18 +57,31 @@ def get_session():
 # --- API Functions ---
 @st.cache_data
 def fetch_trending_movies():
-    """Fetches Top 20 movies released in 2024-2025"""
-    # We explicitly ask for movies released after Jan 1, 2018 to bridge the gap
-    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&sort_by=popularity.desc"
+    """Fetches Top movies released strictly between 2018 and Now"""
+    # We use 'discover' endpoint with strict date filters
+    # sort_by=popularity.desc ensures we get the hits
+    current_date = datetime.now().strftime('%Y-%m-%d')
+    url = f"https://api.themoviedb.org/3/discover/movie?api_key={TMD_API_KEY}&primary_release_date.gte=2018-01-01&primary_release_date.lte={current_date}&sort_by=popularity.desc"
+    
     try:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         session = get_session()
         response = session.get(url, verify=False, timeout=10)
         response.raise_for_status()
         data = response.json()
-        return [m['title'] for m in data['results']]
+        
+        # Double-check the year just in case
+        valid_movies = []
+        for m in data['results']:
+            release_date = m.get('release_date', '')
+            if release_date:
+                year = int(release_date.split('-')[0])
+                if year >= 2018:
+                    valid_movies.append(m['title'])
+        
+        return valid_movies
     except Exception as e:
-        st.sidebar.error(f"API Error: {str(e)}")
+        st.sidebar.error(f"API Connection Error: {str(e)}")
         return []
 
 @st.cache_data
