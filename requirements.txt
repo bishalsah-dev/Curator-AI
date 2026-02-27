@@ -2,4 +2,4 @@ pandas
 scikit-learn
 streamlit
 requests
-matplotlib
+google-generativeai
