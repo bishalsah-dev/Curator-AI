@@ -41,13 +41,19 @@ MOCK_REPORTS = {
 def init_db():
     if not _apps:
         try:
-            # Fetch the JSON credentials from Streamlit Cloud Secrets
-            firebase_secrets = dict(st.secrets["FIREBASE_CREDENTIALS"])
-            cred = credentials.Certificate(firebase_secrets)
+            # Check if we are running on Streamlit Cloud (using Secrets)
+            if "FIREBASE_CREDENTIALS" in st.secrets:
+                firebase_secrets = dict(st.secrets["FIREBASE_CREDENTIALS"])
+                cred = credentials.Certificate(firebase_secrets)
+            # Otherwise, use the local file for your PC development
+            else:
+                cred = credentials.Certificate("serviceAccountKey.json")
+                
             initialize_app(cred)
             return firestore.client()
         except Exception as e:
-            st.error(f"Database Init Failed: {e}")
+            # This will tell you exactly why the connection failed
+            st.error(f"🛡️ Database Connection Error: {e}")
             return None
     return firestore.client()
 
