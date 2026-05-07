@@ -10,6 +10,7 @@ import json
 import plotly.express as px
 from firebase_admin import credentials, firestore, initialize_app, _apps
 import datetime
+import pytz
 
 # Line 14: NOW initialize your session state
 if 'report' not in st.session_state:
@@ -143,7 +144,8 @@ else:
     st.sidebar.markdown("● **Audit Ledger:** `LOCAL_ONLY` (No Cloud Sync)")
 
 # Timestamp of last health check
-st.sidebar.caption(f"Last Health Check: {datetime.datetime.now().strftime('%H:%M:%S')}")
+ist = pytz.timezone('Asia/Kolkata')
+st.sidebar.caption(f"Last Health Check: {datetime.datetime.now(ist).strftime('%H:%M:%S')}")
 st.sidebar.divider()
 st.sidebar.subheader("🔌 Ingress Controller")
 run_mode = st.sidebar.toggle("Enable Real-Time Scapy Sniffing", value=False)
@@ -208,7 +210,7 @@ elif is_validated and st.session_state.report:
             db.collection('threat_audit').document(str(selected_id)).set({
                 'report': st.session_state.report,
                 'node_id': str(selected_id),
-                'timestamp': datetime.datetime.now().isoformat()
+                'timestamp': datetime.datetime.now(ist).isoformat()
             })
             st.success(f"Incident {selected_id} Synced to Cloud.")
 
