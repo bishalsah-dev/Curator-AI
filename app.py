@@ -41,10 +41,14 @@ MOCK_REPORTS = {
 def init_db():
     if not _apps:
         try:
-            cred = credentials.Certificate("serviceAccountKey.json")
+            # Fetch the JSON credentials from Streamlit Cloud Secrets
+            firebase_secrets = dict(st.secrets["FIREBASE_CREDENTIALS"])
+            cred = credentials.Certificate(firebase_secrets)
             initialize_app(cred)
             return firestore.client()
-        except Exception: return None
+        except Exception as e:
+            st.error(f"Database Init Failed: {e}")
+            return None
     return firestore.client()
 
 db = init_db()
