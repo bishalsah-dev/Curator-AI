@@ -8,3 +8,4 @@ plotly
 firebase-admin
 scapy
 python-dotenv
+pytz
